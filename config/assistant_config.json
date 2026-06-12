@@ -1,13 +1,19 @@
 {
+    "llm": {
+        "provider": "ollama",
+        "model": "llama3.2:3b",
+        "base_url": "http://localhost:11434",
+        "max_history": 20,
+        "system_prompt": "custom_prompts/jarvis.txt"
+    },
     "stt": {
         "model_size": "base",
         "device": "auto"
     },
     "wake_word": {
         "keyword": "computer",
-        "sensitivity": 0.5,
-        "hotkey": "ctrl+space",
-        "porcupine_access_key": ""
+        "energy_threshold": 0.02,
+        "hotkey": "ctrl+space"
     },
     "tts": {
         "rate": 175,
