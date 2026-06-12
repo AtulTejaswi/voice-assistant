@@ -1,0 +1,25 @@
+{
+    "stt": {
+        "model_size": "base",
+        "device": "auto"
+    },
+    "wake_word": {
+        "keyword": "computer",
+        "sensitivity": 0.5,
+        "hotkey": "ctrl+space",
+        "porcupine_access_key": ""
+    },
+    "tts": {
+        "rate": 175,
+        "volume": 0.9
+    },
+    "recording": {
+        "duration_seconds": 5,
+        "sample_rate": 16000
+    },
+    "logging": {
+        "level": "INFO",
+        "save_transcripts": false,
+        "transcript_path": "logs/transcripts.log"
+    }
+}
