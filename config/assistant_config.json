@@ -3,8 +3,7 @@
         "provider": "ollama",
         "model": "llama3.2:3b",
         "base_url": "http://localhost:11434",
-        "max_history": 20,
-        "system_prompt": "custom_prompts/jarvis.txt"
+        "max_history": 20
     },
     "stt": {
         "model_size": "base",
@@ -20,12 +19,18 @@
         "volume": 0.9
     },
     "recording": {
-        "duration_seconds": 5,
+        "silence_timeout_sec": 1.5,
+        "max_record_sec": 30.0,
         "sample_rate": 16000
     },
+    "hud": {
+        "enabled": false
+    },
+    "safe_mode": false,
     "logging": {
         "level": "INFO",
         "save_transcripts": false,
+        "save_screenshots": true,
         "transcript_path": "logs/transcripts.log"
     }
 }

@@ -15,27 +15,45 @@ from src.perception_engine import PerceptionEngine
 from src.stt_engine import STTEngine
 from src.tts_engine import TTSEngine
 from src.wake_word import ActivationEngine
+from src.config_manager import ConfigManager
+from src.hud import HUD
 
 
 class VoiceAssistant:
     def __init__(self):
+        self.config = ConfigManager()
         self.memory = MemoryManager()
         self.guard = CredentialGuard()
         self.executor = ActionExecutor()
-        self.llm = LLMCore(model="llama3.2:3b", memory=self.memory)
+        self.llm = LLMCore(
+            model=self.config.llm_model,
+            base_url=self.config.llm_base_url,
+            memory=self.memory,
+        )
         self.interpreter = CommandInterpreter(self.llm, self.executor)
-        self.stt = STTEngine(model_size="base", device="auto")
+        self.stt = STTEngine(model_size=self.config.stt_model, device="auto")
         self.tts = TTSEngine()
-        self.perception = PerceptionEngine()
-        self.activation = ActivationEngine(wake_word="computer", hotkey="ctrl+space")
+        self.tts.set_rate(self.config.tts_rate)
+        self.tts.set_volume(self.config.tts_volume)
+        self.perception = PerceptionEngine(
+            energy_threshold=self.config.get("wake_word.energy_threshold", 0.02),
+            silence_timeout_sec=self.config.get("recording.silence_timeout_sec", 1.5),
+            max_record_sec=self.config.get("recording.max_record_sec", 30.0),
+        )
+        self.activation = ActivationEngine(
+            wake_word=self.config.wake_word,
+            hotkey=self.config.hotkey,
+        )
+        self.hud = HUD(enabled=self.config.hud_enabled)
 
         self.activation.on_activate(self._on_activated)
         self.activation.on_deactivate(self._on_deactivated)
 
     def run(self):
-        # Greet with memory
-        name = self.llm._user_name or "there"
+        self.hud.start()
+        name = self.llm._user_name or "sir"
         self.tts.speak(f"JARVIS ready, {name}")
+        self.hud.set_status("Standby")
         print(f"[JARVIS] Ready. Say 'Computer' or press Ctrl+Space.")
         self.activation.start()
         try:
@@ -48,18 +66,21 @@ class VoiceAssistant:
 
     def shutdown(self):
         self.activation.stop()
+        self.hud.set_status("Shutting down")
         self.tts.speak("Shutting down")
+        self.hud.stop()
         print("[JARVIS] Shut down.")
 
     def _on_activated(self):
+        self.hud.set_status("Listening")
         print("[JARVIS] Listening...")
         self.tts.speak("Listening")
 
     def _on_deactivated(self):
+        self.hud.set_status("Standby")
         print("[JARVIS] Stopped listening")
 
     def _listen_and_process(self):
-        # VAD-based recording (not fixed 5s)
         result = self.perception.record_until_silence()
         if result is None:
             self.activation._deactivate()
@@ -70,7 +91,14 @@ class VoiceAssistant:
             self.activation._deactivate()
             return
 
+        self.hud.set_transcript(transcript)
         print(f"[You] {transcript}")
+
+        # Safe mode check
+        if self.config.safe_mode and any(w in transcript.lower() for w in ["script", "delete", "remove", "format"]):
+            self.tts.speak("Safe mode is enabled. I cannot perform that action.")
+            self.activation._deactivate()
+            return
 
         # Guard
         guard_result = self.guard.inspect(transcript)
@@ -81,18 +109,20 @@ class VoiceAssistant:
             return
 
         # Screen context
-        screen = self.perception.capture_screen(save=True)
         window = self.perception.active_window_title()
         if window:
             print(f"[Context] Active window: {window}")
 
         # LLM reasoning
+        self.hud.set_status("Thinking")
         success, response = self.interpreter.interpret(transcript)
         if not success:
             self.tts.speak("I had trouble processing that.")
             self.activation._deactivate()
             return
 
+        self.hud.set_status("Speaking")
+        self.hud.set_response(response)
         print(f"[JARVIS] {response}")
         self.tts.speak(response)
         self.activation._deactivate()
