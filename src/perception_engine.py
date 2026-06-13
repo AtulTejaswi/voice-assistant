@@ -1,12 +1,10 @@
 """
 Perception engine — VAD-based recording, screen capture, optional vision.
 
-Wraps microphone listening with voice activity detection so recordings
-are variable-length (user speaks until they stop), not fixed 5-second clips.
-Auto-detects the best microphone device at startup.
+Uses sd.rec() polling loop instead of InputStream callback because
+some devices (WDM-KS) don't support callback mode in PortAudio.
 """
 
-import queue
 import threading
 import time
 from dataclasses import dataclass
@@ -40,17 +38,15 @@ class PerceptionEngine:
         self._silence_timeout = silence_timeout_sec
         self._max_record = max_record_sec
         self._min_record = min_record_sec
-        self._frame_duration_ms = 30
+        self._chunk_ms = 100  # 100ms recording chunks
 
         # Auto-detect best mic
         mic = find_best_device()
         self._device = mic["index"]
         self._device_sr = mic["samplerate"]
         self._device_dtype = mic["dtype"]
-        self._frame_size = int(self._device_sr * self._frame_duration_ms / 1000)
+        self._chunk_size = int(self._device_sr * self._chunk_ms / 1000)
 
-        self._audio_queue: queue.Queue[np.ndarray] = queue.Queue()
-        self._stream: Optional[sd.InputStream] = None
         self._running = False
 
     # ------------------------------------------------------------------
@@ -60,51 +56,51 @@ class PerceptionEngine:
     def record_until_silence(self) -> Optional[RecordingResult]:
         """Record audio until the user stops speaking (silence timeout).
 
-        Audio is captured at the device's native sample rate, converted
-        to float32, and downsampled to the target sample rate (16000).
+        Uses sd.rec() polling loop to stay compatible with all device APIs.
         """
         self._running = True
         recording: list[np.ndarray] = []
-        silence_frames = 0
-        speech_frames = 0
-        silence_limit = int(self._silence_timeout / (self._frame_duration_ms / 1000))
-        max_frames = int(self._max_record / (self._frame_duration_ms / 1000))
+        silence_chunks = 0
+        speech_chunks = 0
+        silence_limit = int(self._silence_timeout / (self._chunk_ms / 1000))
+        max_chunks = int(self._max_record / (self._chunk_ms / 1000))
+        min_chunks = int(self._min_record / (self._chunk_ms / 1000))
         started = False
 
         try:
-            with sd.InputStream(
-                samplerate=self._device_sr,
-                channels=1,
-                blocksize=self._frame_size,
-                dtype=self._device_dtype,
-                device=self._device,
-                callback=self._callback,
-            ):
-                while self._running and len(recording) < max_frames:
-                    try:
-                        chunk = self._audio_queue.get(timeout=0.1)
-                    except queue.Empty:
-                        continue
+            for _ in range(max_chunks):
+                if not self._running:
+                    break
 
-                    rms = np.sqrt(np.mean(chunk ** 2))
-                    is_speech = rms > self._energy_threshold
+                chunk = sd.rec(self._chunk_size, samplerate=self._device_sr,
+                               channels=1, dtype=self._device_dtype, device=self._device)
+                sd.wait()
+                chunk = chunk.flatten()
 
-                    if is_speech:
-                        speech_frames += 1
-                        silence_frames = 0
-                        if speech_frames > 3 and not started:
-                            started = True
-                    else:
-                        silence_frames += 1
-                        if started:
-                            speech_frames = max(0, speech_frames - 1)
+                # Convert to float32 and resample to 16k
+                audio = convert_to_float(chunk, self._device_dtype)
+                if self._device_sr != self._target_sr:
+                    audio = resample_to_16k(audio, self._device_sr)
 
-                    recording.append(chunk)
+                rms = np.sqrt(np.mean(audio ** 2))
+                is_speech = rms > self._energy_threshold
 
-                    if started and silence_frames > silence_limit:
-                        break
+                if is_speech:
+                    speech_chunks += 1
+                    silence_chunks = 0
+                    if speech_chunks > 2 and not started:
+                        started = True
+                else:
+                    silence_chunks += 1
+                    if started:
+                        speech_chunks = max(0, speech_chunks - 1)
 
-            if not started or len(recording) < int(self._min_record / (self._frame_duration_ms / 1000)):
+                recording.append(audio)
+
+                if started and silence_chunks > silence_limit:
+                    break
+
+            if not started or len(recording) < min_chunks:
                 return None
 
             audio = np.concatenate(recording)
@@ -117,20 +113,9 @@ class PerceptionEngine:
         finally:
             self._running = False
 
-    def _callback(self, indata, frames, time_info, status):
-        mono = indata[:, 0] if indata.shape[1] > 1 else indata.flatten()
-        mono = convert_to_float(mono, self._device_dtype)
-        if self._device_sr != self._target_sr:
-            mono = resample_to_16k(mono, self._device_sr)
-        self._audio_queue.put(mono)
-
     @staticmethod
     def calibrate(duration_sec: float = 2.0) -> float:
-        """Measure ambient noise and suggest an energy_threshold.
-
-        Records for `duration_sec` seconds (you should speak for the
-        second half), then returns a threshold ~3x the noise floor.
-        """
+        """Measure ambient noise and suggest an energy_threshold."""
         mic = find_best_device()
         sr = mic["samplerate"]
         dtype = mic["dtype"]

@@ -1,9 +1,8 @@
 """
 Activation: Energy-based VAD + Whisper wake word detection, with hotkey.
 
-No API keys, no extra dependencies beyond what's already installed.
-Uses RMS energy threshold to detect speech, then Whisper for wake word.
-Auto-detects the best microphone device at startup.
+Uses sd.rec() polling loop instead of InputStream callback because
+some devices (WDM-KS) don't support callback mode in PortAudio.
 """
 
 import queue
@@ -38,7 +37,8 @@ class ActivationEngine:
         self._device = mic["index"]
         self._device_sr = mic["samplerate"]
         self._device_dtype = mic["dtype"]
-        self._frame_size = int(self._device_sr * 0.03)  # 30ms at device SR
+        self._frame_ms = 50  # 50ms chunks for polling
+        self._frame_size = int(self._device_sr * self._frame_ms / 1000)
 
         self._running = False
         self._listening = False
@@ -49,11 +49,9 @@ class ActivationEngine:
         # Whisper tiny for wake word detection
         self._ww_model = WhisperModel("tiny", device="auto", compute_type="int8")
 
-        # Ring buffer: keep last 3 seconds of audio at target SR (16000)
-        self._ring_size = 3 * self._target_sr
-        self._ring = np.zeros(self._ring_size, dtype=np.float32)
+        # Ring buffer: keep last 3 seconds of audio at target SR
+        self._ring = np.zeros(3 * self._target_sr, dtype=np.float32)
         self._ring_pos = 0
-        self._audio_queue: queue.Queue[np.ndarray] = queue.Queue()
 
     # ------------------------------------------------------------------
     # Public API
@@ -111,58 +109,52 @@ class ActivationEngine:
             import keyboard as kb
             kb.remove_hotkey(self._hotkey_handler)
 
-    def _audio_callback(self, indata, frames, time_info, status):
-        # Convert to float32
-        mono = indata[:, 0] if indata.shape[1] > 1 else indata.flatten()
-        mono = convert_to_float(mono, self._device_dtype)
-
-        # Downsample to 16k for ring buffer
-        if self._device_sr != self._target_sr:
-            mono = resample_to_16k(mono, self._device_sr)
-
-        n = len(mono)
-        if self._ring_pos + n <= self._ring_size:
-            self._ring[self._ring_pos:self._ring_pos + n] = mono
+    def _add_to_ring(self, audio: np.ndarray):
+        """Add float32 audio at target SR to the ring buffer."""
+        n = len(audio)
+        if self._ring_pos + n <= len(self._ring):
+            self._ring[self._ring_pos:self._ring_pos + n] = audio
         else:
-            part = self._ring_size - self._ring_pos
-            self._ring[self._ring_pos:] = mono[:part]
-            self._ring[:n - part] = mono[part:]
-        self._ring_pos = (self._ring_pos + n) % self._ring_size
-        self._audio_queue.put(mono)
+            part = len(self._ring) - self._ring_pos
+            self._ring[self._ring_pos:] = audio[:part]
+            self._ring[:n - part] = audio[part:]
+        self._ring_pos = (self._ring_pos + n) % len(self._ring)
 
     def _run(self):
-        stream = sd.InputStream(
-            samplerate=self._device_sr,
-            channels=1,
-            blocksize=self._frame_size,
-            dtype=self._device_dtype,
-            device=self._device,
-            callback=self._audio_callback,
-        )
-        stream.start()
-
         speech_count = 0
-        try:
-            while self._running:
-                try:
-                    chunk = self._audio_queue.get(timeout=0.1)
-                except queue.Empty:
-                    continue
+        consecutive_silence = 0
 
-                # Energy-based VAD (on 16k downsampled audio)
-                rms = np.sqrt(np.mean(chunk ** 2))
-                if rms > self._energy_threshold:
-                    speech_count += 1
-                else:
-                    speech_count = max(0, speech_count - 2)
+        while self._running:
+            try:
+                chunk = sd.rec(self._frame_size, samplerate=self._device_sr,
+                               channels=1, dtype=self._device_dtype, device=self._device)
+                sd.wait()
+                chunk = chunk.flatten()
+            except Exception as e:
+                time.sleep(0.05)
+                continue
 
-                # Check for wake word after sustained speech
-                if speech_count >= self._min_speech_frames and not self._listening:
-                    speech_count = 0
-                    self._check_wake_word()
-        finally:
-            stream.stop()
-            stream.close()
+            # Convert to float32 and downsample to 16k
+            audio = convert_to_float(chunk, self._device_dtype)
+            if self._device_sr != self._target_sr:
+                audio = resample_to_16k(audio, self._device_sr)
+
+            # Update ring buffer with 16k audio
+            self._add_to_ring(audio)
+
+            # Energy-based VAD
+            rms = np.sqrt(np.mean(audio ** 2))
+            if rms > self._energy_threshold:
+                speech_count += 1
+                consecutive_silence = 0
+            else:
+                speech_count = max(0, speech_count - 2)
+                consecutive_silence += 1
+
+            # Check for wake word after sustained speech
+            if speech_count >= self._min_speech_frames and not self._listening:
+                speech_count = 0
+                self._check_wake_word()
 
     def _check_wake_word(self):
         segments, _ = self._ww_model.transcribe(self._ring, beam_size=1, language="en")
