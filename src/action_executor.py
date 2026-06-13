@@ -17,6 +17,21 @@ class ActionExecutor:
     def __init__(self):
         pyautogui.FAILSAFE = True
         pyautogui.PAUSE = 0.1
+        self._skill_schemas: dict[str, dict] = {}
+        self._skill_handlers: dict[str, callable] = {}
+
+    def register_skill_tool(self, name: str, description: str, properties: dict, handler: callable, required: list[str] = None):
+        """Register a dynamic skill tool (added by skills.py modules)."""
+        self._skill_schemas[name] = {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required or [],
+            },
+        }
+        self._skill_handlers[name] = handler
 
     APP_ALIASES = {
         "chrome": "chrome",
@@ -41,9 +56,8 @@ class ActionExecutor:
     # Tool schema definitions
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def tool_schemas() -> dict:
-        return {
+    def tool_schemas(self) -> dict:
+        base = {
             "launch_app": {
                 "name": "launch_app",
                 "description": "Launch an application by name (chrome, notepad, vs code, explorer, calculator, spotify, etc.)",
@@ -133,9 +147,11 @@ class ActionExecutor:
                 },
             },
         }
+        base.update(self._skill_schemas)
+        return base
 
     def get_handlers(self) -> dict:
-        return {
+        handlers = {
             "launch_app": self.open_app,
             "type_keys": self.type_keys,
             "file_ops": self.file_ops,
@@ -144,6 +160,8 @@ class ActionExecutor:
             "system_action": self.system_action,
             "run_script": self.run_script,
         }
+        handlers.update(self._skill_handlers)
+        return handlers
 
     # ------------------------------------------------------------------
     # Tool implementations

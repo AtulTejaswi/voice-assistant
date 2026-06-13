@@ -8,23 +8,13 @@ Replaces the regex command interpreter with an LLM that:
 """
 
 import json
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 import requests
 
-SYSTEM_PROMPT = """You are JARVIS — a local voice-controlled AI assistant on Windows.
-
-You are efficient, warm, and have a dry wit. Keep responses concise (1-3 sentences).
-
-RULES:
-- If the user asks to DO something (open, type, search, lock, volume, screenshot, etc.), call the right tool.
-- If the user is just chatting (hello, how are you, etc.), respond naturally — DO NOT call any tool.
-- If the user asks a question, answer from your knowledge — DO NOT call a tool unless it requires real-time info (time, date).
-- Never handle passwords, API keys, or credentials.
-- After a tool runs, summarize the result briefly.
-"""
+from src.memory_manager import MemoryManager
+from src.personality import PERSONA as SYSTEM_PROMPT, adapt_tone
 
 
 @dataclass
@@ -42,14 +32,33 @@ class LLMCore:
         base_url: str = "http://localhost:11434",
         system_prompt: str = SYSTEM_PROMPT,
         max_history: int = 20,
+        memory: Optional[MemoryManager] = None,
     ):
         self._model = model
         self._base_url = base_url.rstrip("/")
-        self._system_prompt = system_prompt
+        self._base_system_prompt = system_prompt
         self._max_history = max_history
         self._tools: dict[str, ToolSpec] = {}
         self._history: list[dict[str, str]] = []
         self._user_name: Optional[str] = None
+        self._memory = memory or MemoryManager(ollama_url=self._base_url, embed_model=model)
+
+    @property
+    def _system_prompt(self) -> str:
+        base = self._base_system_prompt
+        if self._user_name:
+            base = f"You are JARVIS, {self._user_name}'s personal AI assistant. You know them well.\n\n" + base.split("\n\n", 1)[1]
+        context = self._memory.build_context("")
+        if context:
+            base += f"\n\n{context}"
+        return base
+
+    def _system_prompt_for(self, user_input: str) -> str:
+        base = self._system_prompt
+        tone = adapt_tone(user_input, [m.get("content", "") for m in self._history[-5:]])
+        if tone:
+            base += f"\n\nTone note: {tone}"
+        return base
 
     # ------------------------------------------------------------------
     # Tool registration
@@ -95,9 +104,11 @@ class LLMCore:
         self._history.append({"role": role, "content": content})
         if len(self._history) > self._max_history:
             self._history = self._history[-self._max_history:]
+        self._memory.add_short_term(role, content)
 
     def clear_history(self):
         self._history = []
+        self._memory.clear_short_term()
 
     # ------------------------------------------------------------------
     # Core reasoning
@@ -107,8 +118,8 @@ class LLMCore:
         return self._chat(user_input)
 
     def _chat(self, user_input: str, include_tools: bool = True) -> str:
-        messages = [{"role": "system", "content": self._system_prompt}]
-        messages.extend(self._history)
+        messages = [{"role": "system", "content": self._system_prompt_for(user_input)}]
+        messages.extend(self._memory.get_short_term())
         if user_input.strip():
             messages.append({"role": "user", "content": user_input})
 
@@ -144,8 +155,8 @@ class LLMCore:
                 fn_args = json.loads(tc["function"]["arguments"])
                 result = self._execute_tool(fn_name, fn_args)
                 self.add_message("tool", result)
+                self._memory.log_episode(fn_name, result, {"args": fn_args})
 
-            # Get final response (no tools this time — model just summarizes)
             return self._chat("What happened?", include_tools=False)
 
         # Plain text response
