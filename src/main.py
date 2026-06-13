@@ -21,6 +21,7 @@ from src.hud import HUD
 
 class VoiceAssistant:
     def __init__(self):
+        self._running = True
         self.config = ConfigManager()
         self.memory = MemoryManager()
         self.guard = CredentialGuard()
@@ -46,9 +47,6 @@ class VoiceAssistant:
         )
         self.hud = HUD(enabled=self.config.hud_enabled)
 
-        self.activation.on_activate(self._on_activated)
-        self.activation.on_deactivate(self._on_deactivated)
-
     def run(self):
         self.hud.start()
         name = self.llm._user_name or "sir"
@@ -57,7 +55,7 @@ class VoiceAssistant:
         print(f"[JARVIS] Ready. Say 'Computer' or press Ctrl+Space.")
         self.activation.start()
         try:
-            while True:
+            while self._running:
                 if self.activation.is_listening:
                     self._listen_and_process()
                 time.sleep(0.1)
@@ -65,9 +63,11 @@ class VoiceAssistant:
             self.shutdown()
 
     def shutdown(self):
+        self._running = False
         self.activation.stop()
         self.hud.set_status("Shutting down")
         self.tts.speak("Shutting down")
+        self.tts.wait_until_done(timeout=3.0)
         self.hud.stop()
         print("[JARVIS] Shut down.")
 
