@@ -27,7 +27,7 @@ class PerceptionEngine:
     def __init__(
         self,
         sample_rate: int = 16000,
-        energy_threshold: float = 0.02,
+        energy_threshold: float = 0.003,
         silence_timeout_sec: float = 1.5,
         max_record_sec: float = 30.0,
         min_record_sec: float = 0.5,
@@ -100,6 +100,28 @@ class PerceptionEngine:
             return None
         finally:
             self._running = False
+
+    @staticmethod
+    def calibrate(duration_sec: float = 2.0) -> float:
+        """Measure ambient noise and suggest an energy_threshold.
+
+        Records for `duration_sec` seconds (you should speak for the
+        second half), then returns a threshold ~2x the quiet RMS.
+        """
+        import sounddevice as sd
+        sr = 16000
+        print(f"[Calibrate] Recording for {duration_sec}s — {'stay silent first half, then speak' if duration_sec > 1 else 'speak now'}...")
+        rec = sd.rec(int(duration_sec * sr), samplerate=sr, channels=1, dtype=np.float32)
+        sd.wait()
+        # Use the last half (or all if short) to detect speech level
+        half = len(rec) // 2
+        levels = [np.sqrt(np.mean(rec[i:i+sr//10] ** 2)) for i in range(0, len(rec), sr//10)]
+        quiet = sorted(levels)[:len(levels)//3]  # bottom third = noise floor
+        noise_floor = np.mean(quiet) if quiet else 0.001
+        suggested = max(noise_floor * 3, 0.002)
+        print(f"[Calibrate] Noise floor: {noise_floor:.5f}")
+        print(f"[Calibrate] Suggested energy_threshold: {suggested:.5f}")
+        return suggested
 
     def _callback(self, indata, frames, time_info, status):
         mono = indata[:, 0] if indata.shape[1] > 1 else indata.flatten()

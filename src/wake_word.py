@@ -21,7 +21,7 @@ class ActivationEngine:
         wake_word: str = "computer",
         hotkey: str = "ctrl+space",
         sample_rate: int = 16000,
-        energy_threshold: float = 0.02,
+        energy_threshold: float = 0.003,
         min_speech_frames: int = 15,
     ):
         self._wake_word = wake_word.lower()

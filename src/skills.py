@@ -47,6 +47,12 @@ def register_skills(executor):
         {"path": {"type": "string", "description": "Directory path (defaults to current)"}},
         handler=_list_directory,
     )
+    executor.register_skill_tool(
+        "calibrate_microphone",
+        "Calibrate the microphone sensitivity. Records for 2 seconds while you speak, then adjusts the energy threshold.",
+        {},
+        handler=_calibrate_microphone,
+    )
 
 
 def _web_search(query: str) -> str:
@@ -115,6 +121,32 @@ def _run_python_code(code: str) -> str:
         return output or "Code executed successfully (no explicit result)"
     except Exception as e:
         return f"Error: {e}"
+
+
+def _calibrate_microphone() -> str:
+    """Record 2s of audio, measure speech level, return suggested threshold."""
+    try:
+        import sounddevice as sd
+        import numpy as np
+        sr = 16000
+        print("[Calibrate] Speak now for 2 seconds...")
+        rec = sd.rec(int(2 * sr), samplerate=sr, channels=1, dtype=np.float32)
+        sd.wait()
+        levels = [np.sqrt(np.mean(rec[i:i+sr//10] ** 2)) for i in range(0, len(rec), sr//10)]
+        quiet = sorted(levels)[:len(levels)//3]
+        noise_floor = float(np.mean(quiet)) if quiet else 0.001
+        suggested = max(noise_floor * 3, 0.002)
+        peak = float(np.max(np.abs(rec)))
+        return (
+            f"Calibration complete.\n"
+            f"  Noise floor: {noise_floor:.5f}\n"
+            f"  Peak level: {peak:.5f}\n"
+            f"  Suggested energy_threshold: {suggested:.5f}\n\n"
+            f"Update config/assistant_config.json:\n"
+            f'  "energy_threshold": {suggested:.5f}'
+        )
+    except Exception as e:
+        return f"Calibration failed: {e}"
 
 
 def _list_directory(path: str = ".") -> str:

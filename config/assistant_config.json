@@ -11,7 +11,7 @@
     },
     "wake_word": {
         "keyword": "computer",
-        "energy_threshold": 0.02,
+        "energy_threshold": 0.003,
         "hotkey": "ctrl+space"
     },
     "tts": {
