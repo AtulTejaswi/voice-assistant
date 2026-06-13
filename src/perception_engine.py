@@ -85,6 +85,9 @@ class PerceptionEngine:
                 rms = np.sqrt(np.mean(audio ** 2))
                 is_speech = rms > self._energy_threshold
 
+                if is_speech and not started and speech_chunks == 0:
+                    print(f"[VAD] Speech detected rms={rms:.5f}", flush=True)
+
                 if is_speech:
                     speech_chunks += 1
                     silence_chunks = 0

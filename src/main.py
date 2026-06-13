@@ -54,11 +54,15 @@ class VoiceAssistant:
         self.hud.set_status("Standby")
         print(f"[JARVIS] Ready. Say 'Computer' or press Ctrl+Space.")
         self.activation.start()
+        loop_count = 0
         try:
             while self._running:
                 if self.activation.is_listening:
                     self._listen_and_process()
                 time.sleep(0.1)
+                loop_count += 1
+                if loop_count % 100 == 0:
+                    print(f"[JARVIS] Running (loop {loop_count})...", flush=True)
         except KeyboardInterrupt:
             self.shutdown()
 
@@ -73,14 +77,15 @@ class VoiceAssistant:
 
     def _on_activated(self):
         self.hud.set_status("Listening")
-        print("[JARVIS] Listening...")
+        print("[JARVIS] Activated — entering listen_and_process", flush=True)
         self.tts.speak("Listening")
 
     def _on_deactivated(self):
         self.hud.set_status("Standby")
-        print("[JARVIS] Stopped listening")
+        print("[JARVIS] Stopped listening", flush=True)
 
     def _listen_and_process(self):
+        print("[JARVIS] Starting recording...", flush=True)
         result = self.perception.record_until_silence()
         if result is None:
             self.activation._deactivate()

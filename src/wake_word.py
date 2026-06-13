@@ -85,16 +85,19 @@ class ActivationEngine:
     def _activate(self):
         if not self._listening:
             self._listening = True
+            print("[WakeWord] Activated", flush=True)
             if self._on_activate:
                 self._on_activate()
 
     def _deactivate(self):
         if self._listening:
             self._listening = False
+            print("[WakeWord] Deactivated", flush=True)
             if self._on_deactivate:
                 self._on_deactivate()
 
     def _toggle(self):
+        print("[WakeWord] Hotkey toggled", flush=True)
         if self._listening:
             self._deactivate()
         else:
@@ -125,6 +128,11 @@ class ActivationEngine:
         consecutive_silence = 0
 
         while self._running:
+            # Yield mic to perception engine while listening
+            if self._listening:
+                time.sleep(0.05)
+                continue
+
             try:
                 chunk = sd.rec(self._frame_size, samplerate=self._device_sr,
                                channels=1, dtype=self._device_dtype, device=self._device)
@@ -151,6 +159,10 @@ class ActivationEngine:
                 speech_count = max(0, speech_count - 2)
                 consecutive_silence += 1
 
+            # Debug: print every 10th speech frame
+            if speech_count > 0 and speech_count % 10 == 0:
+                print(f"[VAD] speech_frames={speech_count} rms={rms:.5f}", flush=True)
+
             # Check for wake word after sustained speech
             if speech_count >= self._min_speech_frames and not self._listening:
                 speech_count = 0
@@ -159,6 +171,7 @@ class ActivationEngine:
     def _check_wake_word(self):
         segments, _ = self._ww_model.transcribe(self._ring, beam_size=1, language="en")
         text = " ".join(seg.text for seg in segments).strip().lower()
+        print(f"[WakeWord] Ring transcribed: '{text}'", flush=True)
         if text and self._wake_word in text:
             print(f"[WakeWord] Detected '{self._wake_word}'")
             self._activate()
