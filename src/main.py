@@ -54,15 +54,11 @@ class VoiceAssistant:
         self.hud.set_status("Standby")
         print(f"[JARVIS] Ready. Say 'Computer' or press Ctrl+Space.")
         self.activation.start()
-        loop_count = 0
         try:
             while self._running:
                 if self.activation.is_listening:
                     self._listen_and_process()
                 time.sleep(0.1)
-                loop_count += 1
-                if loop_count % 100 == 0:
-                    print(f"[JARVIS] Running (loop {loop_count})...", flush=True)
         except KeyboardInterrupt:
             self.shutdown()
 

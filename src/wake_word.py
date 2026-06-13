@@ -23,7 +23,7 @@ class ActivationEngine:
         wake_word: str = "computer",
         hotkey: str = "ctrl+space",
         sample_rate: int = 16000,
-        energy_threshold: float = 0.001,
+        energy_threshold: float = 0.04,
         min_speech_frames: int = 8,
     ):
         self._wake_word = wake_word.lower()
@@ -126,11 +126,23 @@ class ActivationEngine:
     def _run(self):
         speech_count = 0
         consecutive_silence = 0
+        warmup_frames = 20  # discard first ~1s of audio (device init burst)
 
         while self._running:
             # Yield mic to perception engine while listening
             if self._listening:
                 time.sleep(0.05)
+                continue
+
+            # Warmup: discard first frames to avoid device init noise
+            if warmup_frames > 0:
+                try:
+                    sd.rec(self._frame_size, samplerate=self._device_sr,
+                           channels=1, dtype=self._device_dtype, device=self._device)
+                    sd.wait()
+                except Exception:
+                    pass
+                warmup_frames -= 1
                 continue
 
             try:
@@ -158,10 +170,6 @@ class ActivationEngine:
             else:
                 speech_count = max(0, speech_count - 2)
                 consecutive_silence += 1
-
-            # Debug: print every 10th speech frame
-            if speech_count > 0 and speech_count % 10 == 0:
-                print(f"[VAD] speech_frames={speech_count} rms={rms:.5f}", flush=True)
 
             # Check for wake word after sustained speech
             if speech_count >= self._min_speech_frames and not self._listening:

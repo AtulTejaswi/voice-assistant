@@ -28,7 +28,7 @@ class PerceptionEngine:
     def __init__(
         self,
         sample_rate: int = 16000,
-        energy_threshold: float = 0.001,
+        energy_threshold: float = 0.04,
         silence_timeout_sec: float = 1.5,
         max_record_sec: float = 30.0,
         min_record_sec: float = 0.5,
