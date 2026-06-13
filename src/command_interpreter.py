@@ -17,13 +17,6 @@ class CommandInterpreter:
         self._setup_tools()
 
     def _setup_tools(self):
-        # Load skill tools
-        try:
-            from src import skills
-            skills.register_skills(self._executor)
-        except Exception as e:
-            print(f"[Skills] Load error: {e}")
-
         schemas = self._executor.tool_schemas()
         handlers = self._executor.get_handlers()
         self._llm.register_tools_from_dict(schemas, handlers)

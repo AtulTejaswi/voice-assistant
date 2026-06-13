@@ -4,7 +4,11 @@ JARVIS — main entry point.
 Pipeline: wake/hotkey → VAD recording → STT → guard → LLM reason (with memory) → TTS feedback
 """
 
+import subprocess
+import threading
 import time
+
+import requests
 
 from src.credential_guard import CredentialGuard
 from src.command_interpreter import CommandInterpreter
@@ -17,6 +21,7 @@ from src.tts_engine import TTSEngine
 from src.wake_word import ActivationEngine
 from src.config_manager import ConfigManager
 from src.hud import HUD
+from src import skills
 
 
 class VoiceAssistant:
@@ -26,6 +31,10 @@ class VoiceAssistant:
         self.memory = MemoryManager()
         self.guard = CredentialGuard()
         self.executor = ActionExecutor()
+        self.tts = TTSEngine()
+        self.tts.set_rate(self.config.tts_rate)
+        self.tts.set_volume(self.config.tts_volume)
+        skills.register_skills(self.executor, tts=self.tts)
         self.llm = LLMCore(
             model=self.config.llm_model,
             base_url=self.config.llm_base_url,
@@ -33,11 +42,8 @@ class VoiceAssistant:
         )
         self.interpreter = CommandInterpreter(self.llm, self.executor)
         self.stt = STTEngine(model_size=self.config.stt_model, device="auto")
-        self.tts = TTSEngine()
-        self.tts.set_rate(self.config.tts_rate)
-        self.tts.set_volume(self.config.tts_volume)
         self.perception = PerceptionEngine(
-            energy_threshold=self.config.get("wake_word.energy_threshold", 0.02),
+            energy_threshold=self.config.get("wake_word.energy_threshold", 0.04),
             silence_timeout_sec=self.config.get("recording.silence_timeout_sec", 1.5),
             max_record_sec=self.config.get("recording.max_record_sec", 30.0),
         )
@@ -45,10 +51,59 @@ class VoiceAssistant:
             wake_word=self.config.wake_word,
             hotkey=self.config.hotkey,
         )
+        self.activation.on_activate(self._on_activated)
+        self.activation.on_deactivate(self._on_deactivated)
         self.hud = HUD(enabled=self.config.hud_enabled)
+
+    def _check_ollama(self) -> bool:
+        try:
+            r = requests.get(f"{self.config.llm_base_url}/api/tags", timeout=3)
+            if r.status_code == 200:
+                models = [m["name"] for m in r.json().get("models", [])]
+                print(f"[JARVIS] Ollama online. Models: {models}")
+                model = self.config.llm_model
+                if model not in models and not any(model in m for m in models):
+                    print(f"[JARVIS] Model '{model}' not found. Auto-pulling...")
+                    self._pull_model()
+                return True
+        except Exception as e:
+            print(f"[JARVIS] Ollama not reachable: {e}")
+            self.tts.speak("Warning: Ollama is not running. Please start Ollama and restart me.")
+            return False
+        return False
+
+    def _pull_model(self):
+        def _do_pull():
+            self.tts.speak(f"Downloading {self.config.llm_model}. This may take a few minutes.")
+            print(f"[JARVIS] Pulling {self.config.llm_model}...")
+            result = subprocess.run(
+                ["ollama", "pull", self.config.llm_model],
+                capture_output=True, text=True
+            )
+            if result.returncode == 0:
+                self.tts.speak("Model downloaded. I am ready.")
+            else:
+                self.tts.speak("Model download failed. Check your internet connection.")
+                print(f"[JARVIS] Pull error: {result.stderr}")
+
+        threading.Thread(target=_do_pull, daemon=True).start()
+
+    def _print_status(self):
+        print("\n" + "=" * 50)
+        print("  J.A.R.V.I.S  -  Online")
+        print("=" * 50)
+        print(f"  LLM model   : {self.config.llm_model}")
+        print(f"  LLM backend : Ollama ({self.config.llm_base_url})")
+        print(f"  STT model   : {self.config.stt_model}")
+        print(f"  Wake word   : '{self.config.wake_word}'")
+        print(f"  Hotkey      : {self.config.hotkey}")
+        print(f"  Safe mode   : {self.config.safe_mode}")
+        print("=" * 50 + "\n")
 
     def run(self):
         self.hud.start()
+        self._check_ollama()
+        self._print_status()
         name = self.llm._user_name or "sir"
         self.tts.speak(f"JARVIS ready, {name}")
         self.hud.set_status("Standby")
@@ -73,15 +128,15 @@ class VoiceAssistant:
 
     def _on_activated(self):
         self.hud.set_status("Listening")
-        print("[JARVIS] Activated — entering listen_and_process", flush=True)
+        print("[JARVIS] Listening...")
         self.tts.speak("Listening")
 
     def _on_deactivated(self):
         self.hud.set_status("Standby")
-        print("[JARVIS] Stopped listening", flush=True)
+        print("[JARVIS] Stopped listening")
 
     def _listen_and_process(self):
-        print("[JARVIS] Starting recording...", flush=True)
+        print("[JARVIS] Starting recording...")
         result = self.perception.record_until_silence()
         if result is None:
             self.activation._deactivate()
@@ -126,7 +181,12 @@ class VoiceAssistant:
         self.hud.set_response(response)
         print(f"[JARVIS] {response}")
         self.tts.speak(response)
-        self.activation._deactivate()
+
+        # Multi-turn: if JARVIS asked a question, stay listening
+        if response.strip().endswith("?"):
+            print("[JARVIS] Staying in listen mode for follow-up...")
+        else:
+            self.activation._deactivate()
 
 
 def main():

@@ -20,6 +20,11 @@ $packages = @(
     "sounddevice",
     "numpy",
     "pywinauto",
+    "pyperclip",
+    "psutil",
+    "duckduckgo-search",
+    "chromadb",
+    "requests",
     "pytest"
 )
 foreach ($pkg in $packages) {

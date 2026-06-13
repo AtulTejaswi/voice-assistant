@@ -10,15 +10,21 @@ from pathlib import Path
 
 import psutil
 
+# Module-level TTS reference for timed reminders
+tts_ref = None
 
-def register_skills(executor):
+
+def register_skills(executor, tts=None):
     """Register all skill tools with the executor."""
+    global tts_ref
+    tts_ref = tts
+
     executor.register_skill_tool(
-        "web_search",
-        "Search the web for current information using DuckDuckGo",
+        "ddg_search",
+        "Search the web using DuckDuckGo for current information",
         {"query": {"type": "string", "description": "Search query"}},
         required=["query"],
-        handler=_web_search,
+        handler=_ddg_search,
     )
     executor.register_skill_tool(
         "get_weather",
@@ -53,9 +59,38 @@ def register_skills(executor):
         {},
         handler=_calibrate_microphone,
     )
+    executor.register_skill_tool(
+        "set_reminder",
+        "Set a spoken reminder after N minutes. JARVIS will say it aloud.",
+        {
+            "task": {"type": "string", "description": "What to remind the user about"},
+            "minutes": {"type": "number", "description": "How many minutes from now"}
+        },
+        required=["task", "minutes"],
+        handler=lambda task, minutes: _set_reminder(task, minutes, tts_ref),
+    )
+    executor.register_skill_tool(
+        "clipboard_read",
+        "Read the current text from the clipboard so JARVIS can act on it",
+        {},
+        handler=_clipboard_read,
+    )
+    executor.register_skill_tool(
+        "clipboard_write",
+        "Copy text to the clipboard",
+        {"text": {"type": "string", "description": "Text to copy"}},
+        required=["text"],
+        handler=_clipboard_write,
+    )
+    executor.register_skill_tool(
+        "tell_joke",
+        "Tell a short witty joke in JARVIS style",
+        {},
+        handler=_tell_joke,
+    )
 
 
-def _web_search(query: str) -> str:
+def _ddg_search(query: str) -> str:
     try:
         from duckduckgo_search import DDGS
         results = list(DDGS().text(query, max_results=3))
@@ -168,3 +203,49 @@ def _list_directory(path: str = ".") -> str:
         return "\n".join(entries[:30]) + (f"\n... and {len(entries) - 30} more" if len(entries) > 30 else "")
     except Exception as e:
         return f"Error listing directory: {e}"
+
+
+def _set_reminder(task: str, minutes: float, tts) -> str:
+    import threading
+    def _fire():
+        if tts:
+            tts.speak(f"Reminder, sir: {task}")
+    t = threading.Timer(minutes * 60, _fire)
+    t.daemon = True
+    t.start()
+    return f"Reminder set for {minutes} minutes from now."
+
+
+def _clipboard_read() -> str:
+    try:
+        import pyperclip
+        text = pyperclip.paste()
+        return text[:500] if text else "Clipboard is empty."
+    except Exception as e:
+        return f"Could not read clipboard: {e}"
+
+
+def _clipboard_write(text: str) -> str:
+    try:
+        import pyperclip
+        pyperclip.copy(text)
+        return "Copied to clipboard."
+    except Exception as e:
+        return f"Could not write to clipboard: {e}"
+
+
+def _tell_joke() -> str:
+    try:
+        import requests
+        payload = {
+            "model": "llama3.2:3b",
+            "messages": [
+                {"role": "system", "content": "You are JARVIS. Tell one very short, dry, witty joke. One sentence only. No setup/punchline labels."},
+                {"role": "user", "content": "Tell me a joke."}
+            ],
+            "stream": False
+        }
+        r = requests.post("http://localhost:11434/v1/chat/completions", json=payload, timeout=15)
+        return r.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        return "My humor circuits appear to be offline, sir."
