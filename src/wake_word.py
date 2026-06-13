@@ -3,6 +3,7 @@ Activation: Energy-based VAD + Whisper wake word detection, with hotkey.
 
 No API keys, no extra dependencies beyond what's already installed.
 Uses RMS energy threshold to detect speech, then Whisper for wake word.
+Auto-detects the best microphone device at startup.
 """
 
 import queue
@@ -14,6 +15,8 @@ import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
 
+from src.mic_utils import find_best_device, resample_to_16k, convert_to_float
+
 
 class ActivationEngine:
     def __init__(
@@ -21,26 +24,33 @@ class ActivationEngine:
         wake_word: str = "computer",
         hotkey: str = "ctrl+space",
         sample_rate: int = 16000,
-        energy_threshold: float = 0.003,
-        min_speech_frames: int = 15,
+        energy_threshold: float = 0.001,
+        min_speech_frames: int = 8,
     ):
         self._wake_word = wake_word.lower()
         self._hotkey = hotkey
-        self._sample_rate = sample_rate
+        self._target_sr = sample_rate
         self._energy_threshold = energy_threshold
         self._min_speech_frames = min_speech_frames
-        self._frame_size = int(sample_rate * 0.03)  # 30ms frames
+
+        # Auto-detect best mic
+        mic = find_best_device()
+        self._device = mic["index"]
+        self._device_sr = mic["samplerate"]
+        self._device_dtype = mic["dtype"]
+        self._frame_size = int(self._device_sr * 0.03)  # 30ms at device SR
+
         self._running = False
         self._listening = False
         self._on_activate: Optional[Callable[[], None]] = None
         self._on_deactivate: Optional[Callable[[], None]] = None
         self._hotkey_handler = None
 
-        # Whisper tiny for wake word detection (fast, ~1.5GB RAM, reuses cached model)
+        # Whisper tiny for wake word detection
         self._ww_model = WhisperModel("tiny", device="auto", compute_type="int8")
 
-        # Ring buffer: keep last 3 seconds of audio
-        self._ring_size = 3 * sample_rate
+        # Ring buffer: keep last 3 seconds of audio at target SR (16000)
+        self._ring_size = 3 * self._target_sr
         self._ring = np.zeros(self._ring_size, dtype=np.float32)
         self._ring_pos = 0
         self._audio_queue: queue.Queue[np.ndarray] = queue.Queue()
@@ -102,7 +112,14 @@ class ActivationEngine:
             kb.remove_hotkey(self._hotkey_handler)
 
     def _audio_callback(self, indata, frames, time_info, status):
+        # Convert to float32
         mono = indata[:, 0] if indata.shape[1] > 1 else indata.flatten()
+        mono = convert_to_float(mono, self._device_dtype)
+
+        # Downsample to 16k for ring buffer
+        if self._device_sr != self._target_sr:
+            mono = resample_to_16k(mono, self._device_sr)
+
         n = len(mono)
         if self._ring_pos + n <= self._ring_size:
             self._ring[self._ring_pos:self._ring_pos + n] = mono
@@ -115,9 +132,11 @@ class ActivationEngine:
 
     def _run(self):
         stream = sd.InputStream(
-            samplerate=self._sample_rate,
+            samplerate=self._device_sr,
             channels=1,
             blocksize=self._frame_size,
+            dtype=self._device_dtype,
+            device=self._device,
             callback=self._audio_callback,
         )
         stream.start()
@@ -130,7 +149,7 @@ class ActivationEngine:
                 except queue.Empty:
                     continue
 
-                # Energy-based VAD
+                # Energy-based VAD (on 16k downsampled audio)
                 rms = np.sqrt(np.mean(chunk ** 2))
                 if rms > self._energy_threshold:
                     speech_count += 1

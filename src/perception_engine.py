@@ -3,6 +3,7 @@ Perception engine — VAD-based recording, screen capture, optional vision.
 
 Wraps microphone listening with voice activity detection so recordings
 are variable-length (user speaks until they stop), not fixed 5-second clips.
+Auto-detects the best microphone device at startup.
 """
 
 import queue
@@ -14,6 +15,8 @@ from typing import Optional
 
 import numpy as np
 import sounddevice as sd
+
+from src.mic_utils import find_best_device, resample_to_16k, convert_to_float
 
 
 @dataclass
@@ -27,18 +30,25 @@ class PerceptionEngine:
     def __init__(
         self,
         sample_rate: int = 16000,
-        energy_threshold: float = 0.003,
+        energy_threshold: float = 0.001,
         silence_timeout_sec: float = 1.5,
         max_record_sec: float = 30.0,
         min_record_sec: float = 0.5,
     ):
-        self._sample_rate = sample_rate
+        self._target_sr = sample_rate
         self._energy_threshold = energy_threshold
         self._silence_timeout = silence_timeout_sec
         self._max_record = max_record_sec
         self._min_record = min_record_sec
         self._frame_duration_ms = 30
-        self._frame_size = int(sample_rate * self._frame_duration_ms / 1000)
+
+        # Auto-detect best mic
+        mic = find_best_device()
+        self._device = mic["index"]
+        self._device_sr = mic["samplerate"]
+        self._device_dtype = mic["dtype"]
+        self._frame_size = int(self._device_sr * self._frame_duration_ms / 1000)
+
         self._audio_queue: queue.Queue[np.ndarray] = queue.Queue()
         self._stream: Optional[sd.InputStream] = None
         self._running = False
@@ -48,7 +58,11 @@ class PerceptionEngine:
     # ------------------------------------------------------------------
 
     def record_until_silence(self) -> Optional[RecordingResult]:
-        """Record audio until the user stops speaking (silence timeout)."""
+        """Record audio until the user stops speaking (silence timeout).
+
+        Audio is captured at the device's native sample rate, converted
+        to float32, and downsampled to the target sample rate (16000).
+        """
         self._running = True
         recording: list[np.ndarray] = []
         silence_frames = 0
@@ -59,9 +73,11 @@ class PerceptionEngine:
 
         try:
             with sd.InputStream(
-                samplerate=self._sample_rate,
+                samplerate=self._device_sr,
                 channels=1,
                 blocksize=self._frame_size,
+                dtype=self._device_dtype,
+                device=self._device,
                 callback=self._callback,
             ):
                 while self._running and len(recording) < max_frames:
@@ -92,8 +108,8 @@ class PerceptionEngine:
                 return None
 
             audio = np.concatenate(recording)
-            duration = len(audio) / self._sample_rate
-            return RecordingResult(audio=audio, sample_rate=self._sample_rate, duration_sec=duration)
+            duration = len(audio) / self._target_sr
+            return RecordingResult(audio=audio, sample_rate=self._target_sr, duration_sec=duration)
 
         except Exception as e:
             print(f"[Perception] Record error: {e}")
@@ -101,31 +117,37 @@ class PerceptionEngine:
         finally:
             self._running = False
 
+    def _callback(self, indata, frames, time_info, status):
+        mono = indata[:, 0] if indata.shape[1] > 1 else indata.flatten()
+        mono = convert_to_float(mono, self._device_dtype)
+        if self._device_sr != self._target_sr:
+            mono = resample_to_16k(mono, self._device_sr)
+        self._audio_queue.put(mono)
+
     @staticmethod
     def calibrate(duration_sec: float = 2.0) -> float:
         """Measure ambient noise and suggest an energy_threshold.
 
         Records for `duration_sec` seconds (you should speak for the
-        second half), then returns a threshold ~2x the quiet RMS.
+        second half), then returns a threshold ~3x the noise floor.
         """
-        import sounddevice as sd
-        sr = 16000
-        print(f"[Calibrate] Recording for {duration_sec}s — {'stay silent first half, then speak' if duration_sec > 1 else 'speak now'}...")
-        rec = sd.rec(int(duration_sec * sr), samplerate=sr, channels=1, dtype=np.float32)
+        mic = find_best_device()
+        sr = mic["samplerate"]
+        dtype = mic["dtype"]
+        device = mic["index"]
+        print(f"[Calibrate] Recording for {duration_sec}s — speak now...")
+        rec = sd.rec(int(duration_sec * sr), samplerate=sr, channels=1, dtype=dtype, device=device)
         sd.wait()
-        # Use the last half (or all if short) to detect speech level
-        half = len(rec) // 2
-        levels = [np.sqrt(np.mean(rec[i:i+sr//10] ** 2)) for i in range(0, len(rec), sr//10)]
-        quiet = sorted(levels)[:len(levels)//3]  # bottom third = noise floor
-        noise_floor = np.mean(quiet) if quiet else 0.001
+        data = convert_to_float(rec.flatten(), dtype)
+        if sr != 16000:
+            data = resample_to_16k(data, sr)
+        levels = [np.sqrt(np.mean(data[i:i+1600] ** 2)) for i in range(0, len(data), 1600)]
+        quiet = sorted(levels)[:len(levels)//3]
+        noise_floor = float(np.mean(quiet)) if quiet else 0.001
         suggested = max(noise_floor * 3, 0.002)
         print(f"[Calibrate] Noise floor: {noise_floor:.5f}")
         print(f"[Calibrate] Suggested energy_threshold: {suggested:.5f}")
         return suggested
-
-    def _callback(self, indata, frames, time_info, status):
-        mono = indata[:, 0] if indata.shape[1] > 1 else indata.flatten()
-        self._audio_queue.put(mono)
 
     # ------------------------------------------------------------------
     # Screen capture

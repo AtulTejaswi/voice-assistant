@@ -126,17 +126,24 @@ def _run_python_code(code: str) -> str:
 def _calibrate_microphone() -> str:
     """Record 2s of audio, measure speech level, return suggested threshold."""
     try:
+        from src.mic_utils import find_best_device, resample_to_16k, convert_to_float
         import sounddevice as sd
         import numpy as np
-        sr = 16000
-        print("[Calibrate] Speak now for 2 seconds...")
-        rec = sd.rec(int(2 * sr), samplerate=sr, channels=1, dtype=np.float32)
+        mic = find_best_device()
+        sr = mic["samplerate"]
+        dtype = mic["dtype"]
+        device = mic["index"]
+        print(f"[Calibrate] Speak now for 2 seconds (device [{device}] @ {sr}Hz)...")
+        rec = sd.rec(int(2 * sr), samplerate=sr, channels=1, dtype=dtype, device=device)
         sd.wait()
-        levels = [np.sqrt(np.mean(rec[i:i+sr//10] ** 2)) for i in range(0, len(rec), sr//10)]
+        data = convert_to_float(rec.flatten(), dtype)
+        if sr != 16000:
+            data = resample_to_16k(data, sr)
+        levels = [np.sqrt(np.mean(data[i:i+1600] ** 2)) for i in range(0, len(data), 1600)]
         quiet = sorted(levels)[:len(levels)//3]
         noise_floor = float(np.mean(quiet)) if quiet else 0.001
         suggested = max(noise_floor * 3, 0.002)
-        peak = float(np.max(np.abs(rec)))
+        peak = float(np.max(np.abs(data)))
         return (
             f"Calibration complete.\n"
             f"  Noise floor: {noise_floor:.5f}\n"
